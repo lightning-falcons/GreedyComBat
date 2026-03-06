@@ -186,3 +186,89 @@ select_greedy_vars <- function(df_for_cv, feat_cols, candidates,
   unique(selected)
 }
 
+
+#' Select Covariates using a Greedy CV-FVE Algorithm - Allows Initialisation Set
+#'
+#' Performs variable selection by first applying a marginal CV-FVE screen, followed by a greedy forward 
+#' selection algorithm to iteratively build a covariate set that maximizes out-of-sample explained variance.
+#' Optionally starts from a user-specified set of covariates.
+#'
+#' @param df_for_cv A data frame containing the features and candidate covariates.
+#' @param feat_cols A character vector specifying the names of the feature columns.
+#' @param candidates A character vector specifying the names of the candidate covariate columns to evaluate.
+#' @param start_set A character vector specifying the names of covariates to include before greedy forward selection. Default is empty.
+#' @param seed_base An integer used as the base random seed for reproducibility across iterations. Default is 42.
+#' @param keep_threshold A numeric value specifying the minimum CV-FVE (in percent) required for a covariate 
+#' to pass the initial marginal screening. Default is 0.5.
+#' @param min_gain A numeric value specifying the minimum increase in CV-FVE (in percent) required to add 
+#' a covariate during the greedy forward selection phase. Default is 0.5.
+#' @param max_k An integer specifying the maximum number of covariates the algorithm is permitted to select, including any variables in `start_set`. Default is 30.
+#'
+#' @return A character vector of the selected covariate names.
+select_greedy_vars_start <- function(df_for_cv, feat_cols, candidates,
+                                     start_set = character(0),
+                                     seed_base = 42, keep_threshold = 0.5,
+                                     min_gain = 0.5, max_k = 30) {
+  
+  # Clean starting set
+  start_set <- unique(start_set)
+  
+  # If no candidates provided, stop
+  if (!length(candidates) && !length(start_set)) return(character(0))
+  
+  # Run the CV-FVE algorithm for each candidate covariate individually
+  if (length(candidates)) {
+    screen_df <- bind_rows(lapply(candidates, function(v) {
+      res <- calc_cv_fve(df_for_cv, feat_cols, covariates = c(v), seed = seed_base)
+      tibble(variable = v, cv = res$R2_cv)
+    })) %>% arrange(desc(cv))
+    
+    # Keep the variables with marginal CV-FVE above the min threshold
+    keep_vars <- screen_df %>% filter(is.finite(cv), cv >= keep_threshold) %>% pull(variable)
+  } else {
+    keep_vars <- character(0)
+  }
+  
+  # Remove variables already included in the starting set
+  keep_vars <- setdiff(keep_vars, start_set)
+  if (!length(keep_vars) && !length(start_set)) return(character(0))
+  
+  # Initialise from the starting set
+  if (length(start_set)) {
+    if (length(start_set) > max_k) {
+      stop(sprintf("ERROR: start_set has length %d, which exceeds max_k = %d.", length(start_set), max_k))
+    }
+    base_res <- calc_cv_fve(df_for_cv, feat_cols, covariates = start_set, seed = seed_base)
+    selected <- start_set
+    current_cv <- base_res$R2_cv
+  } else {
+    selected <- character(0)
+    current_cv <- 0
+  }
+  
+  # Loop through each variable addition consideration
+  for (k in seq_len(max_k)) {
+    if (!length(keep_vars)) break
+    if (length(selected) >= max_k) break
+    iter_seed <- seed_base + (1000 * k)
+    
+    # Check the CV-FVE scores after addition of each allowable covariate
+    scores <- bind_rows(lapply(keep_vars, function(v) {
+      res <- calc_cv_fve(df_for_cv, feat_cols, covariates = c(selected, v), seed = iter_seed)
+      tibble(var = v, cv = res$R2_cv)
+    })) %>% arrange(desc(cv))
+    
+    # Select the best covariate to add
+    best <- scores[1, ]
+    
+    # If gain less than the threshold, stop
+    if ((best$cv - current_cv) < min_gain) break
+    
+    # Otherwise include the best covariate and continue
+    selected <- c(selected, best$var)
+    current_cv <- best$cv
+    keep_vars <- setdiff(keep_vars, best$var)
+  }
+  unique(selected)
+}
+
