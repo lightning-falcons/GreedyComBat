@@ -1,5 +1,5 @@
 suppressPackageStartupMessages({
-  library(readr); library(dplyr); library(ggplot2); library(tidyr); library(tibble); library(ComBatFamily)
+  library(readr); library(dplyr); library(ggplot2); library(tidyr); library(tibble); library(ComBatFamily); library(patchwork)
 })
 
 # Source the GreedyComBat Functions
@@ -40,8 +40,8 @@ compute_cohen_d <- function(x, y, level0 = NULL, level1 = NULL) {
 # Data Preparation
 # ==============================================================================
 ants_fp   <- "ADNI_ANTsSST_protocol_2019_03_14.csv"
-covar_fp  <- "combat_outputs/merged_cov__with_site.csv"
-schema_fp <- "adni_covariates_curated_schema.csv"
+covar_fp  <- "combat_outputs/combat_covariates_v7_FINAL_IMPUTED.csv"
+schema_fp <- "adni_covariates_curated_schema_v5.csv"
 
 # Load data, covariates and schema
 # Load the data and covariates exactly as is (characters)
@@ -100,6 +100,10 @@ feat_cols <- grep("^thickness", names(df_model), value = TRUE)
 
 # Store every feature as numeric 
 for(f in feat_cols) df_model[[f]] <- as.numeric(df_model[[f]])
+
+# Drop any non-schema covariates
+df_model <- df_model %>% 
+  select(any_of(c("IMAGE_ID", "subid", "ID", "manufac.model.coil.strength.site", feat_cols, names(vmap))))
 
 # Identify every column that isn't an ID or a brain feature
 vars_to_type <- setdiff(names(df_model), c("IMAGE_ID", "subid", "ID", feat_cols))
@@ -421,7 +425,7 @@ plot_eta_map <- function(eta_named, title, out_stub) {
   p <- ggplot(atlas_sf) +
     geom_sf(aes(fill = value), color = "grey30", linewidth = 0.1) +
     coord_sf() +
-    scale_fill_viridis_c(option = "C", limits = c(0, 1),
+    scale_fill_viridis_c(option = "C", limits = c(0, global_max_eta),
                          oob = scales::squish, name = expression(eta^2)) +
     labs(title = title, fill = expression(eta^2)) +
     theme_void(base_size = 11) +
@@ -480,6 +484,10 @@ for (set_name in names(harm_datasets)) {
   # Report the mean values
   message(sprintf("  -> Mean eta^2 = %.4f", mean(eta_vec)))
 }
+
+# Find the global max value to set the scale
+global_max_eta <- max(unlist(eta_results), na.rm = TRUE)
+message(sprintf("Global Max Eta^2: %.4f", global_max_eta))
 
 # Plot and save individual maps + stacked figure
 plot_list <- list()
@@ -659,7 +667,7 @@ parallelise_reps <- TRUE
 reps_per_p <- 30
 
 # Number of cores to use
-max_cores_use <- max(1L, parallel::detectCores(logical = FALSE) - 2L)
+max_cores_use <- max(1L, parallel::detectCores(logical = FALSE) - 6L)
 
 # Candidate pool excluding CORE covariates
 candidate_all <- setdiff(candidates, CORE_VARS)
@@ -1032,204 +1040,6 @@ print(as.data.frame(slope_summary))
 
 p_slope <- ggplot(slope_df, aes(x = method, y = slope, fill = method)) +
   geom_boxplot(outlier.size = 0.7, width = 0.65, color = "black", linewidth = 0.4) +
-  labs(x = NULL, y = "W_SIM slope (signal ROIs)", title = NULL) +
-  scale_fill_discrete(guide = "none") +
-  theme_classic(base_size = 14) +
-  theme(panel.grid = element_blank(),
-        axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
-        axis.text.y = element_text(color = "black"),
-        strip.background = element_rect(fill = "white", color = NA),
-        plot.background = element_rect(fill = "white", color = NA),
-        panel.background = element_rect(fill = "white", color = NA))
-
-p_d <- ggplot(d_df, aes(x = method, y = d, fill = method)) +
-  geom_boxplot(outlier.size = 0.7, width = 0.65, color = "black", linewidth = 0.4) +
-  labs(x = NULL, y = "Siemens Cohen's d (all ROIs)", title = NULL) +
-  scale_fill_discrete(guide = "none") +
-  theme_classic(base_size = 14) +
-  theme(panel.grid = element_blank(),
-        axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
-        axis.text.y = element_text(color = "black"),
-        strip.background = element_rect(fill = "white", color = NA),
-        plot.background = element_rect(fill = "white", color = NA),
-        panel.background = element_rect(fill = "white", color = NA))
-
-p_slope <- p_slope + annotate("text", x = -Inf, y = Inf, label = "(A)", hjust = -0.2, vjust = 1.2, fontface = "bold")
-p_d <- p_d + annotate("text", x = -Inf, y = Inf, label = "(B)", hjust = -0.2, vjust = 1.2, fontface = "bold")
-p_pub <- (p_slope + p_d) + patchwork::plot_layout(ncol = 2)
-print(p_pub)
-
-ggsave("Figure_6_Simulation_Results.pdf", p_pub, width = 11, height = 5.5, device = cairo_pdf)
-ggsave("Figure_6_Simulation_Results.png", p_pub, width = 11, height = 5.5, dpi = 300)
-
-message("Figure 6 saved successfully.")
-
-
-# ==============================================================================
-# FIGURE 6
-# ==============================================================================
-
-# Simulation parameters
-seed <- 42
-delta_thickness <- 0.2
-prop_rois <- 0.5
-sd_eps_W <- 0.4
-Delta_scanner <- 1.0
-
-# Get unique subjects and scanners
-sub_primary <- df_harm %>%
-  select(subid, batch = .data[[batch_col]]) %>%
-  distinct(subid, .keep_all = TRUE)
-
-# Assign scanners to -1 and +1 groups
-scanners <- sort(unique(sub_primary$batch))
-n_scan <- length(scanners)
-Gk <- setNames(rep(c(-1, 1), length.out = n_scan), sample(scanners))
-
-# Generate the simulated signal
-set.seed(seed)
-sub_w <- sub_primary %>%
-  mutate(
-    # Look up the group for the scanner
-    scanner_sign = Gk[batch],
-    # Calculate the scanner shift
-    scanner_shift = Delta_scanner * scanner_sign,
-    # Add noise
-    W_SIM = scanner_shift + rnorm(n(), mean = 0, sd = sd_eps_W)
-  ) %>%
-  select(subid, W_SIM, scanner_group = scanner_sign)
-
-# Drop ROIs, keep covariates and join it with W_SIM
-cov_sim <- df_harm %>%
-  select(-all_of(feat_cols)) %>%
-  left_join(sub_w, by = "subid")
-
-# Determine randomly the affected ROIs
-set.seed(seed + 1L)
-m_aff <- as.integer(round(prop_rois * length(feat_cols)))
-affected_rois <- if (m_aff == 0L) character(0) else sample(feat_cols, size = m_aff, replace = FALSE)
-
-# Inject the signal
-X_sim <- X_raw
-if (length(affected_rois)) {
-  U <- cov_sim$W_SIM
-  for (r in affected_rois) {
-    idx <- match(r, colnames(X_sim))
-    X_sim[, idx] <- as.numeric(X_sim[, idx]) + delta_thickness * U
-  }
-}
-
-# Create the oracle
-set.seed(seed + 2L)
-sub_w_oracle <- sub_w
-
-# Shuffle the W_SIM values
-sub_w_oracle$W_SIM <- sample(sub_w_oracle$W_SIM, size = nrow(sub_w_oracle), replace = FALSE)
-
-# Replace the old W_SIM values with the new ones for oracle
-cov_oracle <- cov_sim %>%
-  select(-W_SIM, -scanner_group) %>%
-  left_join(sub_w_oracle, by = "subid")
-
-# Like before, inject the signal
-X_oracle <- X_raw
-if (length(affected_rois)) {
-  Uo <- cov_oracle$W_SIM
-  for (r in affected_rois) {
-    idx <- match(r, colnames(X_oracle))
-    X_oracle[, idx] <- as.numeric(X_oracle[, idx]) + delta_thickness * Uo
-  }
-}
-
-# Get the candidate list for the simulation which involves adding on W_SIM
-sim_candidates <- unique(c(candidates, "W_SIM"))
-
-# Select greedy variables
-greedy_vars_sim <- select_greedy_vars(
-  df_for_cv = cov_sim %>% bind_cols(as.data.frame(X_sim)),
-  feat_cols = feat_cols,
-  candidates = sim_candidates, 
-  seed_base = 42,
-  keep_threshold = 0.5,
-  min_gain = 0.5,
-  max_k = 30
-)
-
-# Define the covariate sets
-cov_sets_sim <- list(
-  RAW    = NULL,
-  CORE   = CORE_VARS,
-  GREEDY = greedy_vars_sim,
-  ALL    = unique(c(CORE_VARS, sim_candidates))
-)
-
-method_rows <- list()
-method_rows_d <- list()
-
-# Extract the targets (Siemens and W_SIM)
-y_sim_num  <- as.numeric(cov_sim$W_SIM)
-y_sim_site <- factor(ifelse(cov_sim$Siemens == "Siemens", "Siemens", "Other"), 
-                     levels = c("Other", "Siemens"))
-
-# Now determine the effect sizes
-for (m in names(cov_sets_sim)) {
-  
-  # Harmonise
-  if (m == "RAW") {
-    X_h <- X_sim
-  } else {
-    cov_names <- cov_sets_sim[[m]]
-    current_cov_df <- cov_sim[, cov_names, drop = FALSE]
-    
-    # Run ComBat
-    X_h <- run_combat(X_sim, batch_vec, current_cov_df)
-  }
-  
-  # Calculate slopes
-  slopes <- apply(X_h[, affected_rois, drop = FALSE], 2, function(x) {
-    compute_slope(x, y_sim_num)
-  })
-  
-  # Calculate Cohen's d
-  dvals <- apply(X_h, 2, function(x) {
-    compute_cohen_d(x, y_sim_site, level0 = "Other", level1 = "Siemens")
-  })
-  
-  method_rows[[m]]   <- tibble(method = m, roi = affected_rois, slope = as.numeric(slopes))
-  method_rows_d[[m]] <- tibble(method = m, roi = feat_cols, d = as.numeric(dvals))
-}
-
-# Run the same pipeline for oracle
-X_orc_core <- run_combat(X_oracle, batch_vec, cov_oracle[, CORE_VARS, drop = FALSE])
-y_orc_num  <- as.numeric(cov_oracle$W_SIM)
-y_orc_site <- factor(ifelse(cov_oracle$Siemens == "Siemens", "Siemens", "Other"), 
-                     levels = c("Other", "Siemens"))
-
-orc_slopes <- apply(X_orc_core[, affected_rois, drop = FALSE], 2, function(x) {
-  compute_slope(x, y_orc_num)
-})
-orc_dvals <- apply(X_orc_core, 2, function(x) {
-  compute_cohen_d(x, y_orc_site, level0 = "Other", level1 = "Siemens")
-})
-
-method_rows[["ORACLE"]]   <- tibble(method = "ORACLE", roi = affected_rois, slope = as.numeric(orc_slopes))
-method_rows_d[["ORACLE"]] <- tibble(method = "ORACLE", roi = feat_cols, d = as.numeric(orc_dvals))
-
-slope_df <- bind_rows(method_rows)
-d_df     <- bind_rows(method_rows_d)
-
-order_methods <- c("RAW", "CORE", "GREEDY", "ORACLE", "ALL")
-slope_df$method <- factor(slope_df$method, levels = order_methods)
-d_df$method     <- factor(d_df$method, levels = order_methods)
-
-slope_summary <- slope_df %>%
-  group_by(method) %>%
-  summarise(mean_slope = mean(slope), sd_slope = sd(slope), .groups = "drop")
-
-print(as.data.frame(slope_summary))
-
-p_slope <- ggplot(slope_df, aes(x = method, y = slope, fill = method)) +
-  geom_boxplot(outlier.size = 0.7, width = 0.65, color = "black", linewidth = 0.4) +
   labs(x = NULL, y = expression(W[SIM] ~ "slope (signal ROIs)"), title = NULL) +
   scale_fill_discrete(guide = "none") +
   theme_classic(base_size = 14) +
@@ -1254,7 +1064,7 @@ p_d <- ggplot(d_df, aes(x = method, y = d, fill = method)) +
 
 p_slope <- p_slope + annotate("text", x = -Inf, y = Inf, label = "(A)", hjust = -0.2, vjust = 1.2, fontface = "bold")
 p_d <- p_d + annotate("text", x = -Inf, y = Inf, label = "(B)", hjust = -0.2, vjust = 1.2, fontface = "bold")
-p_pub <- (p_slope + p_d) + patchwork::plot_layout(ncol = 2)
+p_pub <- patchwork::wrap_plots(p_slope, p_d, ncol = 2)
 print(p_pub)
 
 ggsave("Figure_6_Simulation_Results.pdf", p_pub, width = 11, height = 5.5, device = cairo_pdf)
@@ -1453,7 +1263,7 @@ p_d <- ggplot(d_df, aes(x = method, y = d, fill = method)) +
 
 p_slope <- p_slope + annotate("text", x = -Inf, y = Inf, label = "(A)", hjust = -0.2, vjust = 1.2, fontface = "bold")
 p_d <- p_d + annotate("text", x = -Inf, y = Inf, label = "(B)", hjust = -0.2, vjust = 1.2, fontface = "bold")
-p_pub <- (p_slope + p_d) + patchwork::plot_layout(ncol = 2)
+p_pub <- patchwork::wrap_plots(p_slope, p_d, ncol = 2)
 print(p_pub)
 
 ggsave("Figure_S1_Simulation_Results.pdf", p_pub, width = 11, height = 5.5, device = cairo_pdf)
@@ -1650,7 +1460,7 @@ p_d <- ggplot(d_df, aes(x = method, y = d, fill = method)) +
 
 p_slope <- p_slope + annotate("text", x = -Inf, y = Inf, label = "(A)", hjust = -0.2, vjust = 1.2, fontface = "bold")
 p_d <- p_d + annotate("text", x = -Inf, y = Inf, label = "(B)", hjust = -0.2, vjust = 1.2, fontface = "bold")
-p_pub <- (p_slope + p_d) + patchwork::plot_layout(ncol = 2)
+p_pub <- patchwork::wrap_plots(p_slope, p_d, ncol = 2)
 print(p_pub)
 
 ggsave("Figure_S2_Simulation_Results.pdf", p_pub, width = 11, height = 5.5, device = cairo_pdf)
@@ -1850,7 +1660,7 @@ p_d <- ggplot(d_df, aes(x = method, y = d, fill = method)) +
 
 p_slope <- p_slope + annotate("text", x = -Inf, y = Inf, label = "(A)", hjust = -0.2, vjust = 1.2, fontface = "bold")
 p_d <- p_d + annotate("text", x = -Inf, y = Inf, label = "(B)", hjust = -0.2, vjust = 1.2, fontface = "bold")
-p_pub <- (p_slope + p_d) + patchwork::plot_layout(ncol = 2)
+p_pub <- patchwork::wrap_plots(p_slope, p_d, ncol = 2)
 print(p_pub)
 
 ggsave("Figure_S3_Simulation_Results.pdf", p_pub, width = 11, height = 5.5, device = cairo_pdf)
