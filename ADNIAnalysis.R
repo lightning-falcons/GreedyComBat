@@ -154,6 +154,21 @@ candidates <- candidates[sapply(df_model[candidates], function(x) length(unique(
 
 message("Screening ", length(candidates), " candidates...")
 
+# Determine how many scanners below to each manufacturer
+message("Calculating Scanner Brand Counts...")
+
+# Get the manufacturer counts
+brand_counts <- df_harm %>%
+  distinct(manufac.model.coil.strength.site) %>%
+  mutate(Brand = sub("_.*", "", manufac.model.coil.strength.site)) %>%
+  count(Brand) %>%
+  arrange(desc(n))
+
+# Print out the manufacturer coutns
+for (i in 1:nrow(brand_counts)) {
+  message(sprintf("  -> %s: %d scanners", brand_counts$Brand[i], brand_counts$n[i]))
+}
+
 # ==============================================================================
 # FIGURE 1
 # ==============================================================================
@@ -352,8 +367,15 @@ df_plot2 <- bind_rows(plot_data)
 df_stats <- bind_rows(stat_data)
 
 # Factor Levels
+# method_levels <- c("RAW", "CORE", "GREEDY", "CORE_GREEDY", "ALL")
+# method_labels <- c("Raw", "Core", "Greedy", "Core + Greedy", "All")
+# 
+# df_plot2$method <- factor(df_plot2$method, levels = method_levels, labels = method_labels)
+# df_stats$method <- factor(df_stats$method, levels = method_levels, labels = method_labels)
+
+# Factor Levels
 method_levels <- c("RAW", "CORE", "GREEDY", "CORE_GREEDY", "ALL")
-method_labels <- c("Raw", "Core", "Greedy", "Core + Greedy", "All")
+method_labels <- c("(A) Raw", "(B) Core", "(C) Greedy", "(D) Core + Greedy", "(E) All")
 
 df_plot2$method <- factor(df_plot2$method, levels = method_levels, labels = method_labels)
 df_stats$method <- factor(df_stats$method, levels = method_levels, labels = method_labels)
@@ -627,6 +649,13 @@ es_df <- bind_rows(effect_rows) %>%
                      labels = c("Raw", "Core", "Greedy", "Core + Greedy", "All"))
   )
 
+median_summary <- es_df %>%
+  group_by(target, dataset) %>%
+  summarize(median_effect = median(effect_size, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = dataset, values_from = median_effect)
+
+print(median_summary)
+
 level_order <- c("Raw", "Core", "Greedy", "Core + Greedy", "All")
 es_df <- es_df %>% mutate(dataset = factor(dataset, levels = level_order))
 
@@ -888,20 +917,21 @@ Delta_scanner <- 1.0
 
 # Get unique subjects and scanners
 sub_primary <- df_harm %>%
-  select(subid, batch = .data[[batch_col]]) %>%
+  transmute(subid = subid, batch = as.character(.data[[batch_col]])) %>%
   distinct(subid, .keep_all = TRUE)
 
 # Assign scanners to -1 and +1 groups
 scanners <- sort(unique(sub_primary$batch))
 n_scan <- length(scanners)
-Gk <- setNames(rep(c(-1, 1), length.out = n_scan), sample(scanners))
+set.seed(seed)
+Gk <- setNames(sample(rep(c(-1, 1), length.out = n_scan)), scanners)
 
 # Generate the simulated signal
 set.seed(seed)
 sub_w <- sub_primary %>%
   mutate(
     # Look up the group for the scanner
-    scanner_sign = Gk[batch],
+    scanner_sign = unname(Gk[batch]),
     # Calculate the scanner shift
     scanner_shift = Delta_scanner * scanner_sign,
     # Add noise
@@ -1032,11 +1062,31 @@ order_methods <- c("RAW", "CORE", "GREEDY", "ORACLE", "ALL")
 slope_df$method <- factor(slope_df$method, levels = order_methods)
 d_df$method     <- factor(d_df$method, levels = order_methods)
 
-slope_summary <- slope_df %>%
-  group_by(method) %>%
-  summarise(mean_slope = mean(slope), sd_slope = sd(slope), .groups = "drop")
+# slope_summary <- slope_df %>%
+#   group_by(method) %>%
+#   summarise(mean_slope = mean(slope), sd_slope = sd(slope), .groups = "drop")
+# 
+# print(as.data.frame(slope_summary))
 
-print(as.data.frame(slope_summary))
+median_slopes <- slope_df %>%
+  group_by(method) %>%
+  summarize(median_slope = median(slope, na.rm = TRUE), .groups = "drop")
+print(as.data.frame(median_slopes))
+
+median_dvals <- d_df %>%
+  group_by(method) %>%
+  summarize(median_d = median(d, na.rm = TRUE), .groups = "drop")
+print(as.data.frame(median_dvals))
+
+spread_slopes <- slope_df %>%
+  group_by(method) %>%
+  summarize(
+    iqr_slope = IQR(slope, na.rm = TRUE),
+    sd_slope = sd(slope, na.rm = TRUE),
+    .groups = "drop"
+  )
+print(as.data.frame(spread_slopes))
+
 
 p_slope <- ggplot(slope_df, aes(x = method, y = slope, fill = method)) +
   geom_boxplot(outlier.size = 0.7, width = 0.65, color = "black", linewidth = 0.4) +
@@ -1087,20 +1137,21 @@ Delta_scanner <- 1.0
 
 # Get unique subjects and scanners
 sub_primary <- df_harm %>%
-  select(subid, batch = .data[[batch_col]]) %>%
+  transmute(subid = subid, batch = as.character(.data[[batch_col]])) %>%
   distinct(subid, .keep_all = TRUE)
 
 # Assign scanners to -1 and +1 groups
 scanners <- sort(unique(sub_primary$batch))
 n_scan <- length(scanners)
-Gk <- setNames(rep(c(-1, 1), length.out = n_scan), sample(scanners))
+set.seed(seed)
+Gk <- setNames(sample(rep(c(-1, 1), length.out = n_scan)), scanners)
 
 # Generate the simulated signal
 set.seed(seed)
 sub_w <- sub_primary %>%
   mutate(
     # Look up the group for the scanner
-    scanner_sign = Gk[batch],
+    scanner_sign = unname(Gk[batch]),
     # Calculate the scanner shift
     scanner_shift = Delta_scanner * scanner_sign,
     # Add noise
@@ -1284,20 +1335,21 @@ Delta_scanner <- 1.0
 
 # Get unique subjects and scanners
 sub_primary <- df_harm %>%
-  select(subid, batch = .data[[batch_col]]) %>%
+  transmute(subid = subid, batch = as.character(.data[[batch_col]])) %>%
   distinct(subid, .keep_all = TRUE)
 
 # Assign scanners to -1 and +1 groups
 scanners <- sort(unique(sub_primary$batch))
 n_scan <- length(scanners)
-Gk <- setNames(rep(c(-1, 1), length.out = n_scan), sample(scanners))
+set.seed(seed)
+Gk <- setNames(sample(rep(c(-1, 1), length.out = n_scan)), scanners)
 
 # Generate the simulated signal
 set.seed(seed)
 sub_w <- sub_primary %>%
   mutate(
     # Look up the group for the scanner
-    scanner_sign = Gk[batch],
+    scanner_sign = unname(Gk[batch]),
     # Calculate the scanner shift
     scanner_shift = Delta_scanner * scanner_sign,
     # Add noise
@@ -1484,20 +1536,21 @@ Delta_scanner <- 0.0 # Change: No site association
 
 # Get unique subjects and scanners
 sub_primary <- df_harm %>%
-  select(subid, batch = .data[[batch_col]]) %>%
+  transmute(subid = subid, batch = as.character(.data[[batch_col]])) %>%
   distinct(subid, .keep_all = TRUE)
 
 # Assign scanners to -1 and +1 groups
 scanners <- sort(unique(sub_primary$batch))
 n_scan <- length(scanners)
-Gk <- setNames(rep(c(-1, 1), length.out = n_scan), sample(scanners))
+set.seed(seed)
+Gk <- setNames(sample(rep(c(-1, 1), length.out = n_scan)), scanners)
 
 # Generate the simulated signal
 set.seed(seed)
 sub_w <- sub_primary %>%
   mutate(
     # Look up the group for the scanner
-    scanner_sign = Gk[batch],
+    scanner_sign = unname(Gk[batch]),
     # Calculate the scanner shift
     scanner_shift = Delta_scanner * scanner_sign,
     # Add noise
@@ -1667,5 +1720,3 @@ ggsave("Figure_S3_Simulation_Results.pdf", p_pub, width = 11, height = 5.5, devi
 ggsave("Figure_S3_Simulation_Results.png", p_pub, width = 11, height = 5.5, dpi = 300)
 
 message("Figure S3 saved successfully.")
-
-
